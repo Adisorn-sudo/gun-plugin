@@ -39,18 +39,6 @@ static std::string toLower(std::string s)
     return s;
 }
 
-// ✅ Helper: Check if raycast point hits entity
-// Entity ใน Minecraft มีขนาด AABB ประมาณ 0.6x1.8 จึงให้ margin
-static bool pointHitsEntity(const endstone::Location &ray_point, const endstone::Location &entity_loc, double hit_radius)
-{
-    const double dx = ray_point.getX() - entity_loc.getX();
-    const double dy = ray_point.getY() - entity_loc.getY();
-    const double dz = ray_point.getZ() - entity_loc.getZ();
-    
-    const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-    return distance <= hit_radius;
-}
-
 } // namespace
 
 class WarzGunsPlugin : public endstone::Plugin {
@@ -163,9 +151,9 @@ public:
 
 private:
     std::unordered_map<std::string, GunDef> guns_ {
-        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0, 0.45, milliseconds(110), 0.6}},
-        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0, 0.40, milliseconds(180), 0.5}},
-        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0, 0.70, milliseconds(900), 0.4}}
+        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0, 0.45, milliseconds(110), 0.8}},
+        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0, 0.40, milliseconds(180), 0.7}},
+        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0, 0.70, milliseconds(900), 0.6}}
     };
 
     std::unordered_map<std::string, GunState> gun_states_;
@@ -253,60 +241,64 @@ private:
         player.spawnParticle(gun.particle_name, eye_location);
         player.playSound(eye_location, "random.explode", 1.0f, 1.5f);
 
-        // ✅ IMPROVED HITSCAN LOGIC - ประสิทธิภาพสูง + ไม่บัค
-        endstone::Player *first_hit = nullptr;
-        double hit_distance = gun.range + 1.0; // Initialize to > range
-
-        // Single pass raycast - ประหยัด iteration
+        // ✅ SIMPLIFIED HITSCAN - Particle-based detection
+        // Loop through raycast points and check collision at EACH point
+        std::set<std::string> hit_players; // Track who we've already hit
+        
         for (double d = 0.0; d <= gun.range; d += gun.step) {
             auto point = eye_location;
             point += direction * d;
 
+            // Spawn particle at this point
             player.spawnParticle(gun.particle_name, point);
 
-            // Check all online players ONCE per point
+            // Get all online players and check if particle hits them
             for (auto *candidate : player.getServer().getOnlinePlayers()) {
                 if (!candidate || candidate->getName() == player.getName()) {
                     continue;
                 }
 
-                // ✅ Skip if already hit
-                if (first_hit && candidate == first_hit) {
+                // Skip if we already hit this player
+                if (hit_players.find(candidate->getName()) != hit_players.end()) {
                     continue;
                 }
 
-                // ✅ ใช้ eye position ของ target สำหรับการตรวจสอบ
-                auto target_eye = candidate->getLocation();
-                target_eye.setY(target_eye.getY() + 1.62);
+                // Get target's bounding box (feet location)
+                auto target_loc = candidate->getLocation();
+                const double target_x = target_loc.getX();
+                const double target_y = target_loc.getY();
+                const double target_z = target_loc.getZ();
 
-                if (pointHitsEntity(point, target_eye, gun.hit_radius)) {
-                    // ✅ First hit found - store and break immediately
-                    if (!first_hit) {
-                        first_hit = candidate;
-                        hit_distance = d;
-                        break; // Exit inner loop, continue to next raycast point
-                    }
+                // Calculate distance from ray point to target location
+                const double dx = point.getX() - target_x;
+                const double dy = point.getY() - target_y;
+                const double dz = point.getZ() - target_z;
+                const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+                // ✅ If particle hits target (within hit_radius)
+                if (distance <= gun.hit_radius) {
+                    // Apply damage
+                    const int current_health = candidate->getHealth();
+                    const int new_health = std::max(0, current_health - gun.damage);
+                    candidate->setHealth(new_health);
+                    
+                    player.sendMessage("§a[HIT] §f" + candidate->getName() + " §c-" + std::to_string(gun.damage) + " HP");
+                    candidate->sendMessage("§c[SHOT] §fYou were hit by " + player.getName());
+
+                    // Mark this player as hit (won't hit again in this shot)
+                    hit_players.insert(candidate->getName());
+
+                    // Spawn hit effect
+                    auto hit_loc = candidate->getLocation();
+                    hit_loc.setY(hit_loc.getY() + 1.0);
+                    player.spawnParticle("minecraft:explosion_particle", hit_loc);
                 }
-            }
-
-            // ✅ Exit outer loop if we already found a hit
-            if (first_hit) {
-                break;
             }
         }
 
-        // ✅ Apply damage ONLY to first target hit (ไม่ทำซ้ำ)
-        if (first_hit) {
-            const int new_health = std::max(0, first_hit->getHealth() - gun.damage);
-            (void)first_hit->setHealth(new_health);
-            player.sendMessage("§aHit " + first_hit->getName() + " for §c" + std::to_string(gun.damage) + " §adamage");
-
-            // Spawn hit effect at target location
-            auto hit_loc = first_hit->getLocation();
-            hit_loc.setY(hit_loc.getY() + 1.62);
-            player.spawnParticle("minecraft:explosion_particle", hit_loc);
-        } else {
-            player.sendMessage("§7Miss!");
+        // Send feedback
+        if (hit_players.empty()) {
+            player.sendMessage("§7[MISS] No hit");
         }
 
         if (state.ammo <= 0) {
