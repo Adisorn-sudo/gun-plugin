@@ -229,9 +229,10 @@ private:
 
         const GunDef &gun = it->second;
 
-        // ✅ FIX: Get eye location correctly (ออก particle จากหัวจริง)
+        // ✅ FIX: Get eye location (particle ออกจากหัวจริง ๆ)
+        // ใช้ getLocation() ของผู้เล่น แล้วเพิ่ม offset ของตา (standard height 1.62)
         auto eye_location = player.getLocation();
-        eye_location.setY(eye_location.getY() + player.getEyeHeight());
+        eye_location.setY(eye_location.getY() + 1.62); // Eye height for player
         
         auto direction = player.getLocation().getDirection();
         (void)direction.normalize();
