@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Change this to the Endstone version you are targeting
-set(ENDSTONE_API_VERSION "0.11" CACHE STRING "Endstone API version")
+set(ENDSTONE_API_VERSION "0.10.15" CACHE STRING "Endstone API version")
 
 include(FetchContent)
 FetchContent_Declare(
