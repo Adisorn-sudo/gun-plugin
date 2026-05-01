@@ -2,8 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cctype>
+#include <cmath>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,8 +19,8 @@ struct GunDef {
     std::string particle_name;
     int max_ammo;
     int damage;
-    float range;
-    float step;
+    double range;
+    double step;
     milliseconds fire_cooldown;
 };
 
@@ -34,11 +35,6 @@ static std::string toLower(std::string s)
         return static_cast<char>(std::tolower(c));
     });
     return s;
-}
-
-static std::vector<std::string> splitLore(const std::string &line1, const std::string &line2)
-{
-    return {line1, line2};
 }
 
 } // namespace
@@ -69,40 +65,22 @@ public:
         }
 
         const std::string action = toLower(args[0]);
-        const GunDef *gun = nullptr;
-
-        if (action == "ak47") {
-            static const GunDef def{"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0f, 0.45f, milliseconds(110)};
-            gun = &def;
-        } else if (action == "glock") {
-            static const GunDef def{"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0f, 0.40f, milliseconds(180)};
-            gun = &def;
-        } else if (action == "sniper") {
-            static const GunDef def{"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0f, 0.70f, milliseconds(900)};
-            gun = &def;
-        }
 
         if (action == "reload") {
-            const auto name = player->getName();
-            auto it = gun_states_.find(name);
-            if (it == gun_states_.end() || it->second.ammo <= 0) {
-                player->sendMessage("No gun ammo to reload.");
-                return true;
-            }
-
             const std::string held = getHeldGunKey(*player);
             if (held.empty()) {
                 player->sendMessage("Hold a gun first.");
                 return true;
             }
 
-            auto g = guns_.find(held);
-            if (g == guns_.end()) {
+            const auto it = guns_.find(held);
+            if (it == guns_.end()) {
                 player->sendMessage("That item is not a registered gun.");
                 return true;
             }
 
-            it->second.ammo = g->second.max_ammo;
+            auto &state = gun_states_[player->getName()];
+            state.ammo = it->second.max_ammo;
             player->sendMessage("Reloaded.");
             return true;
         }
@@ -114,18 +92,27 @@ public:
                 return true;
             }
 
-            auto g = guns_.find(held);
-            if (g == guns_.end()) {
+            const auto it = guns_.find(held);
+            if (it == guns_.end()) {
                 player->sendMessage("That item is not a registered gun.");
                 return true;
             }
 
             auto &state = gun_states_[player->getName()];
             if (state.ammo <= 0) {
-                state.ammo = g->second.max_ammo;
+                state.ammo = it->second.max_ammo;
             }
-            player->sendMessage("Ammo: " + std::to_string(state.ammo) + "/" + std::to_string(g->second.max_ammo));
+            player->sendMessage("Ammo: " + std::to_string(state.ammo) + "/" + std::to_string(it->second.max_ammo));
             return true;
+        }
+
+        const GunDef *gun = nullptr;
+        if (action == "ak47") {
+            gun = &guns_.at("ak47");
+        } else if (action == "glock") {
+            gun = &guns_.at("glock");
+        } else if (action == "sniper") {
+            gun = &guns_.at("sniper");
         }
 
         if (!gun) {
@@ -146,7 +133,6 @@ public:
             return;
         }
 
-        auto &player = event.getPlayer();
         auto *item = event.getItem();
         if (!item) {
             return;
@@ -158,67 +144,81 @@ public:
         }
 
         event.setCancelled(true);
-        shootGun(player, key);
+        shootGun(event.getPlayer(), key);
     }
 
 private:
     std::unordered_map<std::string, GunDef> guns_ {
-        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0f, 0.45f, milliseconds(110)}},
-        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0f, 0.40f, milliseconds(180)}},
-        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0f, 0.70f, milliseconds(900)}}
+        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0, 0.45, milliseconds(110)}},
+        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0, 0.40, milliseconds(180)}},
+        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0, 0.70, milliseconds(900)}}
     };
 
     std::unordered_map<std::string, GunState> gun_states_;
 
     static std::string getGunKey(const endstone::ItemStack &item)
     {
-        try {
-            auto meta = item.getItemMeta();
-            const std::string display = meta.getDisplayName();
-            if (display == "§cAK-47") return "ak47";
-            if (display == "§eGlock") return "glock";
-            if (display == "§bSniper") return "sniper";
-        } catch (...) {
-            // Item may have no meta or the API may throw on plain items.
+        if (!item.hasItemMeta()) {
+            return {};
         }
+
+        auto meta = item.getItemMeta();
+        if (!meta || !meta->hasDisplayName()) {
+            return {};
+        }
+
+        const auto display = meta->getDisplayName();
+        if (!display) {
+            return {};
+        }
+
+        if (*display == "§cAK-47") return "ak47";
+        if (*display == "§eGlock") return "glock";
+        if (*display == "§bSniper") return "sniper";
         return {};
     }
 
     std::string getHeldGunKey(endstone::Player &player)
     {
-        auto &item = player.getInventory().getItemInMainHand();
-        return getGunKey(item);
+        auto item = player.getInventory().getItemInMainHand();
+        if (!item) {
+            return {};
+        }
+        return getGunKey(*item);
     }
 
     void giveGun(endstone::Player &player, const GunDef &gun)
     {
-        // One stable base item is enough for the first WarZ prototype.
-        // If your build uses a different enum spelling for ItemType, swap this one line.
-        endstone::ItemStack item(endstone::ItemType::Stick, 1);
+        endstone::ItemStack item("minecraft:stick", 1);
 
         auto meta = item.getItemMeta();
-        meta.setDisplayName(gun.display_name);
-        meta.setLore(splitLore(
+        if (!meta) {
+            player.sendMessage("Failed to create item meta.");
+            return;
+        }
+
+        meta->setDisplayName(std::optional<std::string>(gun.display_name));
+        meta->setLore(std::optional<std::vector<std::string>>({
             "§7Right click to shoot",
             "§7Reload with /gun reload"
-        ));
-        meta.setUnbreakable(true);
-        item.setItemMeta(meta);
+        }));
+        meta->setUnbreakable(true);
+        item.setItemMeta(meta.get());
 
-        player.getInventory().setItemInMainHand(item);
+        player.getInventory().setItemInMainHand(&item);
         gun_states_[player.getName()] = GunState{gun.max_ammo, steady_clock::now() - gun.fire_cooldown};
     }
 
     void shootGun(endstone::Player &player, const std::string &gun_key)
     {
-        auto g = guns_.find(gun_key);
-        if (g == guns_.end()) {
+        const auto it = guns_.find(gun_key);
+        if (it == guns_.end()) {
             return;
         }
 
         auto &state = gun_states_[player.getName()];
         const auto now = steady_clock::now();
-        if (state.last_shot.time_since_epoch().count() != 0 && now - state.last_shot < g->second.fire_cooldown) {
+        if (state.last_shot.time_since_epoch().count() != 0 && now - state.last_shot < it->second.fire_cooldown) {
             return;
         }
 
@@ -232,35 +232,37 @@ private:
 
         auto start = player.getLocation();
         auto direction = start.getDirection();
-        direction.normalize();
+        (void)direction.normalize();
 
-        // Muzzle flash at the shooter.
-        player.spawnParticle(g->second.particle_name, start);
-
-        const float range = g->second.range;
-        const float step = g->second.step;
+        player.spawnParticle(it->second.particle_name, start);
+        player.playSound(start, "random.explode", 1.0f, 1.5f);
 
         bool hit = false;
         endstone::Player *hit_player = nullptr;
 
-        for (float d = 0.0f; d <= range; d += step) {
+        for (double d = 0.0; d <= it->second.range; d += it->second.step) {
             auto point = start;
             point += direction * d;
 
-            player.spawnParticle(g->second.particle_name, point);
+            player.spawnParticle(it->second.particle_name, point);
 
-            const auto point_pos = static_cast<endstone::Vector>(point);
+            const double px = point.getX();
+            const double py = point.getY();
+            const double pz = point.getZ();
 
-            for (auto &candidate : player.getServer().getOnlinePlayers()) {
-                if (candidate.getName() == player.getName()) {
+            for (auto candidate : player.getServer().getOnlinePlayers()) {
+                if (!candidate || candidate->getName() == player.getName()) {
                     continue;
                 }
 
-                const auto candidate_pos = static_cast<endstone::Vector>(candidate.getLocation());
-                const auto diff = candidate_pos - point_pos;
-                if (diff.lengthSquared() <= 1.0f) {
+                const auto loc = candidate->getLocation();
+                const double dx = loc.getX() - px;
+                const double dy = loc.getY() - py;
+                const double dz = loc.getZ() - pz;
+
+                if ((dx * dx + dy * dy + dz * dz) <= 1.0) {
                     hit = true;
-                    hit_player = &candidate;
+                    hit_player = candidate;
                     break;
                 }
             }
@@ -270,12 +272,10 @@ private:
             }
         }
 
-        player.playSound(start, "random.explode", 1.0f, 1.5f);
-
         if (hit && hit_player) {
-            const float new_health = std::max(0.0f, hit_player->getHealth() - static_cast<float>(g->second.damage));
-            hit_player->setHealth(new_health);
-            player.sendMessage("Hit " + hit_player->getName() + " for " + std::to_string(g->second.damage));
+            const int new_health = std::max(0, hit_player->getHealth() - it->second.damage);
+            (void)hit_player->setHealth(new_health);
+            player.sendMessage("Hit " + hit_player->getName() + " for " + std::to_string(it->second.damage));
         }
 
         if (state.ammo <= 0) {
