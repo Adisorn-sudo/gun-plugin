@@ -19,5 +19,5 @@ FetchContent_MakeAvailable(endstone)
 string(TOUPPER ${PROJECT_NAME} PROJECT_NAME_UPPER)
 configure_file(include/version.h.in include/version.h)
 
-endstone_add_plugin(${PROJECT_NAME} src/plugin.cpp)
+endstone_add_plugin(${PROJECT_NAME} src/warz_guns.cpp)
 target_include_directories(${PROJECT_NAME} PRIVATE include ${CMAKE_CURRENT_BINARY_DIR}/include)
