@@ -133,7 +133,7 @@ public:
             return;
         }
 
-        auto *item = event.getItem();
+        const auto &item = event.getItem(); // const std::optional<ItemStack>&
         if (!item) {
             return;
         }
@@ -167,14 +167,10 @@ private:
             return {};
         }
 
-        const auto display = meta->getDisplayName();
-        if (!display) {
-            return {};
-        }
-
-        if (*display == "§cAK-47") return "ak47";
-        if (*display == "§eGlock") return "glock";
-        if (*display == "§bSniper") return "sniper";
+        const std::string display = meta->getDisplayName();
+        if (display == "§cAK-47") return "ak47";
+        if (display == "§eGlock") return "glock";
+        if (display == "§bSniper") return "sniper";
         return {};
     }
 
@@ -205,7 +201,7 @@ private:
         meta->setUnbreakable(true);
         item.setItemMeta(meta.get());
 
-        player.getInventory().setItemInMainHand(&item);
+        player.getInventory().setItemInMainHand(std::optional<endstone::ItemStack>(item));
         gun_states_[player.getName()] = GunState{gun.max_ammo, steady_clock::now() - gun.fire_cooldown};
     }
 
@@ -250,7 +246,7 @@ private:
             const double py = point.getY();
             const double pz = point.getZ();
 
-            for (auto candidate : player.getServer().getOnlinePlayers()) {
+            for (auto *candidate : player.getServer().getOnlinePlayers()) {
                 if (!candidate || candidate->getName() == player.getName()) {
                     continue;
                 }
