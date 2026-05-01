@@ -22,6 +22,7 @@ struct GunDef {
     double range;
     double step;
     milliseconds fire_cooldown;
+    double hit_radius;
 };
 
 struct GunState {
@@ -149,9 +150,9 @@ public:
 
 private:
     std::unordered_map<std::string, GunDef> guns_ {
-        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0, 0.45, milliseconds(110)}},
-        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0, 0.40, milliseconds(180)}},
-        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0, 0.70, milliseconds(900)}}
+        {"ak47", {"ak47", "§cAK-47", "minecraft:basic_flame_particle", 30, 4, 28.0, 0.45, milliseconds(110), 0.5}},
+        {"glock", {"glock", "§eGlock", "minecraft:basic_flame_particle", 12, 3, 20.0, 0.40, milliseconds(180), 0.4}},
+        {"sniper", {"sniper", "§bSniper", "minecraft:basic_flame_particle", 5, 10, 90.0, 0.70, milliseconds(900), 0.3}}
     };
 
     std::unordered_map<std::string, GunState> gun_states_;
@@ -226,28 +227,42 @@ private:
         state.last_shot = now;
         state.ammo -= 1;
 
-        auto start = player.getLocation();
-        auto direction = start.getDirection();
+        const GunDef &gun = it->second;
+
+        // ✅ FIX: Get eye location correctly (ออก particle จากหัวจริง)
+        auto eye_location = player.getLocation();
+        eye_location.setY(eye_location.getY() + player.getEyeHeight());
+        
+        auto direction = player.getLocation().getDirection();
         (void)direction.normalize();
 
-        player.spawnParticle(it->second.particle_name, start);
-        player.playSound(start, "random.explode", 1.0f, 1.5f);
+        // Spawn particle at eye
+        player.spawnParticle(gun.particle_name, eye_location);
+        player.playSound(eye_location, "random.explode", 1.0f, 1.5f);
 
-        bool hit = false;
-        endstone::Player *hit_player = nullptr;
+        // ✅ FIX: Better hitscan with improved entity detection
+        std::vector<endstone::Player *> hit_targets;
+        double closest_distance = gun.range;
 
-        for (double d = 0.0; d <= it->second.range; d += it->second.step) {
-            auto point = start;
+        // Raycast from eye to range
+        for (double d = 0.0; d <= gun.range; d += gun.step) {
+            auto point = eye_location;
             point += direction * d;
 
-            player.spawnParticle(it->second.particle_name, point);
+            player.spawnParticle(gun.particle_name, point);
 
             const double px = point.getX();
             const double py = point.getY();
             const double pz = point.getZ();
 
+            // Check all online players for collision
             for (auto *candidate : player.getServer().getOnlinePlayers()) {
                 if (!candidate || candidate->getName() == player.getName()) {
+                    continue;
+                }
+
+                // Avoid hitting same player twice
+                if (std::find(hit_targets.begin(), hit_targets.end(), candidate) != hit_targets.end()) {
                     continue;
                 }
 
@@ -256,22 +271,25 @@ private:
                 const double dy = loc.getY() - py;
                 const double dz = loc.getZ() - pz;
 
-                if ((dx * dx + dy * dy + dz * dz) <= 1.0) {
-                    hit = true;
-                    hit_player = candidate;
-                    break;
+                // ✅ FIX: Use hit_radius from gun definition (better collision detection)
+                double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (distance <= gun.hit_radius) {
+                    // Only add if we haven't hit yet AND this is closer than previous hit
+                    if (d < closest_distance) {
+                        hit_targets.push_back(candidate);
+                        closest_distance = d;
+                    }
                 }
-            }
-
-            if (hit) {
-                break;
             }
         }
 
-        if (hit && hit_player) {
-            const int new_health = std::max(0, hit_player->getHealth() - it->second.damage);
-            (void)hit_player->setHealth(new_health);
-            player.sendMessage("Hit " + hit_player->getName() + " for " + std::to_string(it->second.damage));
+        // ✅ FIX: Apply damage to ALL hit targets (not just first one)
+        for (auto *hit_player : hit_targets) {
+            if (hit_player) {
+                const int new_health = std::max(0, hit_player->getHealth() - gun.damage);
+                (void)hit_player->setHealth(new_health);
+                player.sendMessage("Hit " + hit_player->getName() + " for " + std::to_string(gun.damage));
+            }
         }
 
         if (state.ammo <= 0) {
