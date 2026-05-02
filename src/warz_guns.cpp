@@ -206,97 +206,105 @@ private:
         gun_states_[player.getName()] = GunState{gun.max_ammo, steady_clock::now() - gun.fire_cooldown};
     }
 
-    void shootGun(endstone::Player &player, const std::string &gun_key)
-    {
-        const auto it = guns_.find(gun_key);
-        if (it == guns_.end()) {
-            return;
-        }
+void shootGun(endstone::Player &player, const std::string &gun_key)
+{
+    const auto it = guns_.find(gun_key);
+    if (it == guns_.end()) return;
 
-        auto &state = gun_states_[player.getName()];
-        const auto now = steady_clock::now();
-        if (state.last_shot.time_since_epoch().count() != 0 && now - state.last_shot < it->second.fire_cooldown) {
-            return;
-        }
+    auto &state = gun_states_[player.getName()];
+    const auto now = steady_clock::now();
 
-        if (state.ammo <= 0) {
-            player.sendMessage("Out of ammo. Use /gun reload");
-            return;
-        }
+    if (state.last_shot.time_since_epoch().count() != 0 &&
+        now - state.last_shot < it->second.fire_cooldown) {
+        return;
+    }
 
-        state.last_shot = now;
-        state.ammo -= 1;
+    if (state.ammo <= 0) {
+        player.sendMessage("Out of ammo. Use /gun reload");
+        return;
+    }
 
-        auto start = player.getLocation();
-        auto direction = start.getDirection();
-        (void)direction.normalize();
+    state.last_shot = now;
+    state.ammo -= 1;
 
-        player.spawnParticle(it->second.particle_name, start);
-        player.playSound(start, "random.explode", 1.0f, 1.5f);
+    // ✅ FIX 1: ใช้ตำแหน่งตา (eye height) เป็นจุดเริ่มต้นของ ray
+    //    Minecraft player eye height = 1.62
+    auto feet = player.getLocation();
+    endstone::Location eye_start(
+        feet.getDimension(),
+        feet.getX(),
+        feet.getY() + 1.62,   // ← offset ขึ้นมาที่ระดับตา
+        feet.getZ(),
+        feet.getYaw(),
+        feet.getPitch()
+    );
 
-        // ✅ Track hit targets
-        std::set<std::string> hit_players;
+    auto direction = eye_start.getDirection();
+    direction.normalize();
 
-        for (double d = 0.0; d <= it->second.range; d += it->second.step) {
-            auto point = start;
-            point += direction * d;
+    player.spawnParticle(it->second.particle_name, eye_start);
+    player.playSound(eye_start, "random.explode", 1.0f, 1.5f);
 
-            player.spawnParticle(it->second.particle_name, point);
+    std::set<std::string> hit_players;
 
-            const double px = point.getX();
-            const double py = point.getY();
-            const double pz = point.getZ();
+    for (double d = it->second.step; d <= it->second.range; d += it->second.step) {
+        auto point = eye_start;
+        point += direction * d;
 
-            // ✅ Get all online players for this point
-            std::vector<endstone::Player *> candidates = player.getServer().getOnlinePlayers();
-            
-            for (auto *candidate : candidates) {
-                if (!candidate || candidate->getName() == player.getName()) {
-                    continue;
-                }
+        const double px = point.getX();
+        const double py = point.getY();
+        const double pz = point.getZ();
 
-                // ✅ Skip if already hit
-                if (hit_players.find(candidate->getName()) != hit_players.end()) {
-                    continue;
-                }
+        player.spawnParticle(it->second.particle_name, point);
 
-                const auto loc = candidate->getLocation();
-                const double dx = loc.getX() - px;
-                const double dy = loc.getY() - py;
-                const double dz = loc.getZ() - pz;
+        std::vector<endstone::Player *> candidates = player.getServer().getOnlinePlayers();
+        for (auto *candidate : candidates) {
+            if (!candidate || candidate->getName() == player.getName()) continue;
+            if (hit_players.count(candidate->getName())) continue;
 
-                // ✅ Check collision with better radius (0.8)
-                const double distance_sq = dx * dx + dy * dy + dz * dz;
-                const double hit_radius = 0.8;
+            const auto loc = candidate->getLocation();
 
-                if (distance_sq <= hit_radius * hit_radius) {
-                    // ✅ HIT! Apply damage
-                    int current_health = candidate->getHealth();
-                    int new_health = std::max(0, current_health - it->second.damage);
-                    candidate->setHealth(new_health);
+            // ✅ FIX 2: เทียบ XZ แยกจาก Y โดยใช้ hitbox จริงของ player
+            //    Minecraft player hitbox: กว้าง 0.6, สูง 1.8
+            //    → XZ half-width = 0.3 + buffer = 0.45
+            //    → Y range = feet ถึง feet+1.8 (+ buffer เล็กน้อย)
+            const double dx = loc.getX() - px;
+            const double dz = loc.getZ() - pz;
+            const double xz_dist_sq = dx * dx + dz * dz;
 
-                    // Log for debugging
-                    player.sendMessage("§a[HIT] " + candidate->getName() + " §c-" + std::to_string(it->second.damage));
-                    candidate->sendMessage("§c[SHOT] You were hit by " + player.getName());
+            const double rel_y = py - loc.getY(); // กระสุนสูงกว่าเท้า entity เท่าไหร่
 
-                    // Mark as hit
-                    hit_players.insert(candidate->getName());
+            constexpr double HIT_XZ  = 0.45;   // XZ radius รวม buffer
+            constexpr double HIT_Y_LO = -0.1;  // เผื่อลงนิดหน่อย
+            constexpr double HIT_Y_HI =  1.9;  // เผื่อบน (1.8 + buffer)
 
-                    // Hit effect
-                    player.spawnParticle("minecraft:explosion_particle", loc);
-                }
+            if (xz_dist_sq <= HIT_XZ * HIT_XZ &&
+                rel_y >= HIT_Y_LO && rel_y <= HIT_Y_HI)
+            {
+                // ✅ HIT
+                int new_health = std::max(0, candidate->getHealth() - it->second.damage);
+                candidate->setHealth(new_health);
+
+                player.sendMessage("§a[HIT] " + candidate->getName() +
+                                   " §c-" + std::to_string(it->second.damage));
+                candidate->sendMessage("§c[SHOT] You were hit by " + player.getName());
+
+                hit_players.insert(candidate->getName());
+                player.spawnParticle("minecraft:explosion_particle", loc);
             }
         }
 
-        // ✅ Feedback
-        if (hit_players.empty()) {
-            player.sendMessage("§7[MISS]");
-        }
-
-        if (state.ammo <= 0) {
-            player.sendMessage("§eReload with /gun reload");
-        }
+        // Early exit ถ้าโดนแล้ว (optional: ลบออกถ้าอยาก pierce)
+        if (!hit_players.empty()) break;
     }
+
+    if (hit_players.empty()) {
+        player.sendMessage("§7[MISS]");
+    }
+    if (state.ammo <= 0) {
+        player.sendMessage("§eReload with /gun reload");
+    }
+}
 };
 
 ENDSTONE_PLUGIN("warz_guns", "0.1.0", WarzGunsPlugin)
