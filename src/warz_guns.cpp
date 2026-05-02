@@ -8,7 +8,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <set>
 
 using namespace std::chrono;
 
@@ -134,7 +133,7 @@ public:
             return;
         }
 
-        const auto &item = event.getItem(); // const std::optional<ItemStack>&
+        const auto &item = event.getItem();
         if (!item) {
             return;
         }
@@ -209,86 +208,105 @@ private:
     void shootGun(endstone::Player &player, const std::string &gun_key)
     {
         const auto it = guns_.find(gun_key);
-        if (it == guns_.end()) {
-            return;
-        }
+        if (it == guns_.end()) return;
 
         auto &state = gun_states_[player.getName()];
         const auto now = steady_clock::now();
-        if (state.last_shot.time_since_epoch().count() != 0 && now - state.last_shot < it->second.fire_cooldown) {
-            return;
-        }
+        if (state.last_shot.time_since_epoch().count() != 0 &&
+            now - state.last_shot < it->second.fire_cooldown) return;
 
         if (state.ammo <= 0) {
-            player.sendMessage("Out of ammo. Use /gun reload");
+            player.sendMessage("§cOut of ammo. /gun reload");
             return;
         }
-
         state.last_shot = now;
         state.ammo -= 1;
 
-        auto feet = player.getLocation();
-        auto direction = feet.getDirection();
-        direction.normalize();
+        auto feet  = player.getLocation();
+        auto dir   = feet.getDirection();
+        dir.normalize();
 
-        // Eye height — ไม่ต้องสร้าง Location ใหม่เลย, ใช้ double แทน
-        const double ox = feet.getX();
-        const double oy = feet.getY() + 1.62; // ← ระดับตา
-        const double oz = feet.getZ();
-        const double dx_dir = direction.getX();
-        const double dy_dir = direction.getY();
-        const double dz_dir = direction.getZ();
+        // Ray origin = eye level
+        const double ox  = feet.getX();
+        const double oy  = feet.getY() + 1.62;
+        const double oz  = feet.getZ();
+        const double ddx = dir.getX();
+        const double ddy = dir.getY();
+        const double ddz = dir.getZ();
 
-        player.spawnParticle(it->second.particle_name, feet);
         player.playSound(feet, "random.explode", 1.0f, 1.5f);
 
-        std::set<std::string> hit_players;
-        bool any_hit = false;
+        // --- DEBUG: แสดง ray info ---
+        player.sendMessage("§8[DBG] eye=(" +
+            std::to_string((int)ox) + "," +
+            std::to_string((int)oy) + "," +
+            std::to_string((int)oz) + ") dir=(" +
+            std::to_string(ddx).substr(0,5) + "," +
+            std::to_string(ddy).substr(0,5) + "," +
+            std::to_string(ddz).substr(0,5) + ")");
 
-        for (double d = it->second.step; d <= it->second.range; d += it->second.step) {
-            // คำนวณ point เป็น double ตรงๆ ไม่ผ่าน Location
-            const double px = ox + dx_dir * d;
-            const double py = oy + dy_dir * d;
-            const double pz = oz + dz_dir * d;
+        auto candidates = player.getServer().getOnlinePlayers();
+        player.sendMessage("§8[DBG] online=" + std::to_string(candidates.size()));
 
-            // Particle (ใช้ feet location แล้ว setY ชั่วคราว)
-            auto pt = feet;
-            pt.setY(py);
-            pt.setX(px);
-            pt.setZ(pz);
-            player.spawnParticle(it->second.particle_name, pt);
+        // --- Hit detection: perpendicular distance จาก point ถึง ray ---
+        endstone::Player *hit_target = nullptr;
+        double hit_t       = 1e18;
+        double hit_perp    = 1e18;
 
-            for (auto *candidate : player.getServer().getOnlinePlayers()) {
-                if (!candidate || candidate->getName() == player.getName()) continue;
-                if (hit_players.count(candidate->getName())) continue;
+        for (auto *cand : candidates) {
+            if (!cand || cand->getName() == player.getName()) continue;
 
-                const auto loc = candidate->getLocation();
-                const double cdx = loc.getX() - px;
-                const double cdz = loc.getZ() - pz;
-                const double rel_y = py - loc.getY(); // กระสุนสูงกว่าเท้า entity เท่าไหร่
+            auto cloc = cand->getLocation();
 
-                // Cylindrical hitbox แทน sphere
-                // XZ radius 0.45, Y ต้องอยู่ใน [−0.1, 1.9] (hitbox สูง 1.8 + buffer)
-                if ((cdx*cdx + cdz*cdz) <= 0.45*0.45 && rel_y >= -0.1 && rel_y <= 1.9) {
-                    int new_hp = std::max(0, candidate->getHealth() - it->second.damage);
-                    candidate->setHealth(new_hp);
+            // ใช้ body center (feet + 1.0) แทนเท้า
+            const double cx = cloc.getX() - ox;
+            const double cy = (cloc.getY() + 1.0) - oy;
+            const double cz = cloc.getZ() - oz;
 
-                    player.sendMessage("§a[HIT] §f" + candidate->getName() +
-                                       " §c-" + std::to_string(it->second.damage) + " HP");
-                    candidate->sendMessage("§c[SHOT] §fYou were hit by " + player.getName());
-                    hit_players.insert(candidate->getName());
-                    any_hit = true;
+            // Projection บน ray
+            const double t = cx*ddx + cy*ddy + cz*ddz;
 
-                    auto hit_loc = candidate->getLocation();
-                    hit_loc.setY(hit_loc.getY() + 1.0);
-                    player.spawnParticle("minecraft:explosion_particle", hit_loc);
-                }
+            // Perpendicular vector
+            const double px = cx - t*ddx;
+            const double py = cy - t*ddy;
+            const double pz = cz - t*ddz;
+            const double perp = std::sqrt(px*px + py*py + pz*pz);
+
+            // DEBUG ทุก candidate
+            player.sendMessage("§8[DBG] " + cand->getName() +
+                " t=" + std::to_string((int)t) +
+                " perp=" + std::to_string(perp).substr(0,5) +
+                " pos=(" + std::to_string((int)cloc.getX()) + "," +
+                std::to_string((int)cloc.getY()) + "," +
+                std::to_string((int)cloc.getZ()) + ")");
+
+            // ต้องอยู่ข้างหน้า (t > 0) และในระยะ และ perp น้อยพอ
+            if (t < 0.5 || t > it->second.range) continue;
+            if (perp > 1.2) continue;
+
+            // เลือก closest ตาม t
+            if (t < hit_t) {
+                hit_t      = t;
+                hit_perp   = perp;
+                hit_target = cand;
             }
-
-            if (!hit_players.empty()) break;
         }
 
-        if (!any_hit) player.sendMessage("§7[MISS]");
+        if (hit_target) {
+            int new_hp = std::max(0, hit_target->getHealth() - it->second.damage);
+            hit_target->setHealth(new_hp);
+            player.sendMessage("§a[HIT] §f" + hit_target->getName() +
+                               " §c-" + std::to_string(it->second.damage) + "HP" +
+                               " §8(t=" + std::to_string((int)hit_t) +
+                               " perp=" + std::to_string(hit_perp).substr(0,5) + ")");
+            hit_target->sendMessage("§c[SHOT] §fYou were hit by " + player.getName());
+            auto hloc = hit_target->getLocation();
+            hloc.setY(hloc.getY() + 1.0);
+            player.spawnParticle("minecraft:explosion_particle", hloc);
+        } else {
+            player.sendMessage("§7[MISS]");
+        }
+
         if (state.ammo <= 0) player.sendMessage("§eReload with /gun reload");
     }
 };
